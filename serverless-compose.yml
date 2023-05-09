@@ -1,0 +1,4 @@
+
+services:
+  infrastructure:
+    path: modules/infrastructure

@@ -1,0 +1,106 @@
+service: infrastructure
+frameworkVersion: 3
+
+provider:
+  name: aws
+  runtime: nodejs14.x
+
+  stage: ${env:STAGE}
+  region: ${env:REGION}
+  profile: ${env:PROFILE}
+
+  databaseUser: ${env:DATABASE_USER}
+  databasePassword: ${env:DATABASE_PASSWORD}
+
+resources:
+  - Resources:
+
+      # Database
+      Postgresql:
+        Type: AWS::RDS::DBCluster
+        Properties:
+          Engine: aurora-postgresql
+          EngineMode: serverless
+          DatabaseName: ${self:provider.stage}
+          DBClusterIdentifier: ${self:service}
+          MasterUsername: ${self:provider.databaseUser}
+          MasterUserPassword: ${self:provider.databasePassword}
+          EnableHttpEndpoint: true
+          Port: 5432
+          ScalingConfiguration:
+            AutoPause: true
+            MinCapacity: 2
+            MaxCapacity: 2
+            SecondsUntilAutoPause: 300
+
+      DatabaseCredentials:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          Name: DatabaseCredentials
+          SecretString:
+            Fn::Sub:
+              - '{"dbInstanceIdentifier": "${identifier}","engine": "${engine}","host": "${host}","port": "${port}","resourceId": "${id}","username": "${user}","password":"${password}"}'
+              - identifier: ${self:resources.0.Resources.Postgresql.Properties.DBClusterIdentifier}
+                engine: ${self:resources.0.Resources.Postgresql.Properties.Engine}
+                host:
+                  "Fn::GetAtt": [Postgresql, Endpoint.Address]
+                port: ${self:resources.0.Resources.Postgresql.Properties.Port}
+                id:
+                  Ref: Postgresql
+                user: ${self:provider.databaseUser}
+                password: ${self:provider.databasePassword}
+
+      # Cognito
+      UserPool:
+        Type: AWS::Cognito::UserPool
+        Properties:
+          UserPoolName: user-pool
+          Policies:
+            PasswordPolicy:
+              MinimumLength: 8
+          Schema:
+            - AttributeDataType: String
+              Name: email
+            - AttributeDataType: String
+              Name: username
+            - AttributeDataType: String
+              Name: id
+          UsernameAttributes:
+            - email
+          AutoVerifiedAttributes:
+            - email
+          EmailVerificationSubject: Verify your email for our app
+          EmailVerificationMessage: Please click the link below to verify your email address. {####} is your verification code.
+          SmsVerificationMessage: Your verification code for our app is {####}
+          MfaConfiguration: OFF
+          AdminCreateUserConfig:
+            AllowAdminCreateUserOnly: false
+
+      UserPoolClient:
+        Type: AWS::Cognito::UserPoolClient
+        Properties:
+          ClientName: user-pool-client
+          GenerateSecret: false
+          UserPoolId: !Ref UserPool
+
+      # Api
+      UserPoolAuthorizer:
+        Type: AWS::ApiGateway::Authorizer
+        Properties:
+          Name: user-pool-authorizer-${self:provider.stage}
+          IdentitySource: method.request.header.Authorization
+          Type: COGNITO_USER_POOLS
+          RestApiId: !Ref RestApi
+          ProviderARNs:
+            - "Fn::GetAtt": [UserPool, Arn]
+
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          Name: rest-api
+
+      ApiStage:
+        Type: AWS::ApiGateway::Deployment
+        Properties:
+          RestApiId: !Ref RestApi
+          StageName: ${self:provider.stage}
